@@ -165,6 +165,19 @@ resource "aws_lambda_function" "this" {
     aws_iam_role_policy_attachment.additional_many,
     aws_iam_role_policy_attachment.additional_one,
   ]
+
+  lifecycle {
+    ignore_changes = [
+      # Ignore all changes to the package itself as we will deploy this with a different process.
+      source_code_hash,
+      filename,
+      s3_bucket,
+      s3_key,
+      s3_object_version,
+      # The version tag changes as the package changes and we do not want to delete it when making changes to the lambda.
+      tags["version"],
+    ]
+  }
 }
 
 resource "aws_lambda_layer_version" "this" {
