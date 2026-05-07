@@ -218,6 +218,7 @@ resource "aws_lambda_function" "this" {
       s3_bucket,
       s3_key,
       s3_object_version,
+      image_uri,
       # The version tag changes as the package changes and we do not want to delete it when making changes to the lambda.
       tags["version"],
     ]
