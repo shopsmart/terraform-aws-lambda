@@ -7,18 +7,35 @@ locals {
 
   archive_filename        = try(data.external.archive_prepare[0].result.filename, null)
   archive_filename_string = local.archive_filename != null ? local.archive_filename : ""
-  archive_was_missing     = try(data.external.archive_prepare[0].result.was_missing, false)
 
   # Use a generated filename to determine when the source code has changed.
   # filename - to get package from local
-  filename    = var.local_existing_package != null ? var.local_existing_package : (var.store_on_s3 ? null : local.archive_filename)
-  was_missing = var.local_existing_package != null ? !fileexists(var.local_existing_package) : local.archive_was_missing
+  filename = var.local_existing_package != null ? var.local_existing_package : (var.store_on_s3 ? null : local.archive_filename)
+
+  source_code_hash = var.ignore_source_code_hash ? null : (terraform_data.package_filename_for_hash[0].output.filename != null ? try(filebase64sha256(terraform_data.package_filename_for_hash[0].output.filename), null) : null)
 
   # s3_* - to get package from S3
   s3_bucket         = var.s3_existing_package != null ? try(var.s3_existing_package.bucket, null) : (var.store_on_s3 ? var.s3_bucket : null)
   s3_key            = var.s3_existing_package != null ? try(var.s3_existing_package.key, null) : (var.store_on_s3 ? var.s3_prefix != null ? format("%s%s", var.s3_prefix, replace(local.archive_filename_string, "/^.*//", "")) : replace(local.archive_filename_string, "/^\\.//", "") : null)
   s3_object_version = var.s3_existing_package != null ? try(var.s3_existing_package.version_id, null) : (var.store_on_s3 ? try(aws_s3_object.lambda_package[0].version_id, null) : null)
 
+}
+
+
+# For computing the source_code_hash, wrap local.filename in a resource
+# that depends on null_resource.archive, and, if var.local_existing_package
+# is set to the output of another resource, on that other resource.
+# terraform-docs-ignore
+resource "terraform_data" "package_filename_for_hash" {
+  count = var.ignore_source_code_hash ? 0 : 1
+
+  input = {
+    filename = local.filename
+  }
+
+  triggers_replace = [local.filename]
+
+  depends_on = [null_resource.archive]
 }
 
 resource "aws_lambda_function" "this" {
@@ -55,7 +72,7 @@ resource "aws_lambda_function" "this" {
   }
 
   filename         = local.filename
-  source_code_hash = var.ignore_source_code_hash ? null : (local.filename == null ? false : fileexists(local.filename)) && !local.was_missing ? filebase64sha256(local.filename) : null
+  source_code_hash = local.source_code_hash
 
   s3_bucket         = local.s3_bucket
   s3_key            = local.s3_key
@@ -129,6 +146,25 @@ resource "aws_lambda_function" "this" {
     }
   }
 
+  dynamic "durable_config" {
+    for_each = var.durable_config_execution_timeout != null ? [true] : []
+
+    content {
+      execution_timeout = var.durable_config_execution_timeout
+      retention_period  = var.durable_config_retention_period
+    }
+  }
+
+  dynamic "capacity_provider_config" {
+    for_each = var.managed_instances_capacity_provider_arn != null ? [true] : []
+
+    content {
+      lambda_managed_instances_capacity_provider_config {
+        capacity_provider_arn = var.managed_instances_capacity_provider_arn
+      }
+    }
+  }
+
   dynamic "timeouts" {
     for_each = length(var.timeouts) > 0 ? [true] : []
 
@@ -139,8 +175,14 @@ resource "aws_lambda_function" "this" {
     }
   }
 
+  dynamic "tenancy_config" {
+    for_each = var.tenant_isolation_mode ? [true] : []
+    content {
+      tenant_isolation_mode = "PER_TENANT"
+    }
+  }
+
   tags = merge(
-    var.include_default_tag ? { terraform-aws-modules = "lambda" } : {},
     var.tags,
     var.function_tags
   )
@@ -196,7 +238,7 @@ resource "aws_lambda_layer_version" "this" {
   skip_destroy             = var.layer_skip_destroy
 
   filename         = local.filename
-  source_code_hash = var.ignore_source_code_hash ? null : (local.filename == null ? false : fileexists(local.filename)) && !local.was_missing ? filebase64sha256(local.filename) : null
+  source_code_hash = local.source_code_hash
 
   s3_bucket         = local.s3_bucket
   s3_key            = local.s3_key
@@ -247,11 +289,12 @@ resource "aws_cloudwatch_log_group" "lambda" {
 
   region = var.region
 
-  name              = coalesce(var.logging_log_group, "/aws/lambda/${var.lambda_at_edge ? "us-east-1." : ""}${var.function_name}")
-  retention_in_days = var.cloudwatch_logs_retention_in_days
-  kms_key_id        = var.cloudwatch_logs_kms_key_id
-  skip_destroy      = var.cloudwatch_logs_skip_destroy
-  log_group_class   = var.cloudwatch_logs_log_group_class
+  name                        = coalesce(var.logging_log_group, "/aws/lambda/${var.lambda_at_edge ? "us-east-1." : ""}${var.function_name}")
+  retention_in_days           = var.cloudwatch_logs_retention_in_days
+  kms_key_id                  = var.cloudwatch_logs_kms_key_id
+  skip_destroy                = var.cloudwatch_logs_skip_destroy
+  log_group_class             = var.cloudwatch_logs_log_group_class
+  deletion_protection_enabled = var.cloudwatch_logs_deletion_protection_enabled
 
   tags = merge(var.tags, var.cloudwatch_logs_tags)
 }

@@ -194,8 +194,10 @@ variable "tags" {
   default     = {}
 }
 
+# TODO - remove at next breaking change
+# tflint-ignore: terraform_unused_declarations
 variable "include_default_tag" {
-  description = "Set to false to not include the default tag in the tags map."
+  description = "[Deprecated] Set to false to not include the default tag in the tags map."
   type        = bool
   default     = true
 }
@@ -276,6 +278,12 @@ variable "skip_destroy" {
   description = "Set to true if you do not wish the function to be deleted at destroy time, and instead just remove the function from the Terraform state. Useful for Lambda@Edge functions attached to CloudFront distributions."
   type        = bool
   default     = null
+}
+
+variable "tenant_isolation_mode" {
+  description = "Enable tenant isolation mode for the Lambda Function"
+  type        = bool
+  default     = false
 }
 
 ###############
@@ -465,6 +473,12 @@ variable "cloudwatch_logs_skip_destroy" {
 variable "cloudwatch_logs_log_group_class" {
   description = "Specified the log class of the log group. Possible values are: `STANDARD` or `INFREQUENT_ACCESS`"
   type        = string
+  default     = null
+}
+
+variable "cloudwatch_logs_deletion_protection_enabled" {
+  description = "Whether to enable deletion protection for the log group."
+  type        = bool
   default     = null
 }
 
@@ -844,6 +858,32 @@ variable "logging_log_group" {
 
 variable "recursive_loop" {
   description = "Lambda function recursion configuration. Valid values are Allow or Terminate."
+  type        = string
+  default     = null
+}
+
+############################################
+# Lambda Durable Execution Settings
+############################################
+
+variable "durable_config_execution_timeout" {
+  description = "Maximum execution time in seconds for the durable function. Valid values between 1 and 31622400 (366 days)."
+  type        = number
+  default     = null
+}
+
+variable "durable_config_retention_period" {
+  description = "Number of days to retain the function's execution state. Valid values between 1 and 90. Defaults to 14 if durable_config is enabled."
+  type        = number
+  default     = null
+}
+
+############################################
+# Lambda Managed Instances Capacity Provider Settings
+############################################
+
+variable "managed_instances_capacity_provider_arn" {
+  description = "ARN of the Capacity Provider."
   type        = string
   default     = null
 }

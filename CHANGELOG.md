@@ -2,6 +2,79 @@
 
 All notable changes to this project will be documented in this file.
 
+## [8.8.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.7.0...v8.8.0) (2026-04-23)
+
+### Features
+
+* Add support for managed instances ([#745](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/745)) ([8a9941b](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/8a9941b1b9c1bc986d1c88249981397b95d31df1))
+
+## [8.7.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.6.0...v8.7.0) (2026-02-18)
+
+### Features
+
+* Add support for durable lambda feature ([#731](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/731)) ([582013a](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/582013abd9c67dafe903accf3970b6f5e5b8ff49))
+
+## [8.6.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.5.1...v8.6.0) (2026-02-18)
+
+### Features
+
+* Add deletion_protection_enabled argument for lambda log group ([#736](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/736)) ([9b6ba43](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/9b6ba43a3b129ff26b9b14e9331a0ae7ef7ea57e))
+
+## [8.5.1](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.5.0...v8.5.1) (2026-02-18)
+
+### Bug Fixes
+
+* Fix error with inconsistent values for fileexists when setting the source code hash ([#734](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/734)) ([99a1bc5](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/99a1bc50e332dc8702216faf5c0380cbbe11c89c))
+
+## [8.5.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.4.0...v8.5.0) (2026-02-02)
+
+### Features
+
+* Filter the directories/files hashed when using commands with patterns, docs and examples fixes ([#720](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/720)) ([daa5dfc](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/daa5dfc39aa4ae773df783587ef757c03ab094ce))
+
+## [8.4.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.3.0...v8.4.0) (2026-01-26)
+
+### Features
+
+* Add uv support for python packaging ([#723](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/723)) ([8dc36e8](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/8dc36e89a31c0fa249ee89188f9ee8d9c79674d1))
+
+## [8.3.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.2.1...v8.3.0) (2026-01-25)
+
+### Features
+
+* Add support for tenant isolation mode feature ([#718](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/718)) ([ab332c1](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/ab332c1e75f956144bce193966eb2b194d3194a3))
+
+## [8.2.1](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.2.0...v8.2.1) (2026-01-25)
+
+### Bug Fixes
+
+* Avoids issue due to strict requirement for fileexists to return consistent results ([#722](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/722)) ([d6b4321](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/d6b4321d9633b0f5b02c6b9162a453816dd559c5))
+
+## [8.2.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.1.2...v8.2.0) (2026-01-08)
+
+### Features
+
+* Add provider meta user-agent, replacing static tag ([#721](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/721)) ([1309f7e](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/1309f7e8a816fb2fea1764e15ef9965bfa938c00))
+
+## [8.1.2](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.1.1...v8.1.2) (2025-10-22)
+
+### Bug Fixes
+
+* Make quiet_archive_local_exec properly suppress Poetry/pip/npm output ([#709](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/709)) ([bae0385](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/bae03859f4b7a389c20e52dcbd5c83d58f1916a8))
+
+## [8.1.1](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.1.0...v8.1.1) (2025-10-21)
+
+### Bug Fixes
+
+* Update CI workflow versions to latest ([#713](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/713)) ([feb4561](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/feb456187b3727b6b94562cc39d3cbce509b3d03))
+
+## [8.1.0](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.0.1...v8.1.0) (2025-08-22)
+
+
+### Features
+
+* Respect the package-lock.json for a NodeJS Lambda function ([#681](https://github.com/terraform-aws-modules/terraform-aws-lambda/issues/681)) ([5e4391c](https://github.com/terraform-aws-modules/terraform-aws-lambda/commit/5e4391c55605d11ac98655a2fd2d6a8f2583d3b6))
+
 ## [8.0.1](https://github.com/terraform-aws-modules/terraform-aws-lambda/compare/v8.0.0...v8.0.1) (2025-06-25)
 
 

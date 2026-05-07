@@ -20,7 +20,7 @@ import tempfile
 import operator
 import platform
 import subprocess
-from subprocess import check_call, check_output
+from subprocess import check_call, check_output, CalledProcessError
 from contextlib import contextmanager
 from base64 import b64encode
 import logging
@@ -243,31 +243,49 @@ def generate_content_hash(source_paths, hash_func=hashlib.sha256, log=None):
 
     if log:
         log = log.getChild("hash")
+    _log = log if log.isEnabledFor(DEBUG3) else None
 
     hash_obj = hash_func()
 
-    for source_path in source_paths:
-        if os.path.isdir(source_path):
-            source_dir = source_path
-            _log = log if log.isEnabledFor(DEBUG3) else None
-            for source_file in list_files(source_dir, log=_log):
+    for source_path, pf, prefix in source_paths:
+        if pf is not None:
+            for path_from_pattern in pf.filter(source_path, prefix):
+                if os.path.isdir(path_from_pattern):
+                    # Hash only the path of the directory
+                    source_dir = path_from_pattern
+                    source_file = None
+                else:
+                    source_dir = os.path.dirname(path_from_pattern)
+                    source_file = os.path.relpath(path_from_pattern, source_dir)
                 update_hash(hash_obj, source_dir, source_file)
                 if log:
-                    log.debug(os.path.join(source_dir, source_file))
+                    log.debug(path_from_pattern)
         else:
-            source_dir = os.path.dirname(source_path)
-            source_file = os.path.relpath(source_path, source_dir)
-            update_hash(hash_obj, source_dir, source_file)
-            if log:
-                log.debug(source_path)
+            if os.path.isdir(source_path):
+                source_dir = source_path
+                for source_file in list_files(source_dir, log=_log):
+                    update_hash(hash_obj, source_dir, source_file)
+                    if log:
+                        log.debug(os.path.join(source_dir, source_file))
+            else:
+                source_dir = os.path.dirname(source_path)
+                source_file = os.path.relpath(source_path, source_dir)
+                update_hash(hash_obj, source_dir, source_file)
+                if log:
+                    log.debug(source_path)
 
     return hash_obj
 
 
-def update_hash(hash_obj, file_root, file_path):
+def update_hash(hash_obj, file_root, file_path=None):
     """
-    Update a hashlib object with the relative path and contents of a file.
+    Update a hashlib object with the relative path and, if the given
+    file_path is not None, its content.
     """
+
+    if file_path is None:
+        hash_obj.update(file_root.encode())
+        return
 
     relative_path = os.path.join(file_root, file_path)
     hash_obj.update(relative_path.encode())
@@ -293,9 +311,11 @@ class ZipWriteStream:
         compress_type=zipfile.ZIP_DEFLATED,
         compresslevel=None,
         timestamp=None,
+        quiet=False,
     ):
         self.timestamp = timestamp
         self.filename = zip_filename
+        self.quiet = quiet
 
         if not (self.filename and isinstance(self.filename, str)):
             raise ValueError("Zip file path must be provided")
@@ -312,7 +332,8 @@ class ZipWriteStream:
             raise zipfile.BadZipFile("ZipStream object can't be reused")
         self._ensure_base_path(self.filename)
         self._tmp_filename = "{}.tmp".format(self.filename)
-        self._log.info("creating '%s' archive", self.filename)
+        if not self.quiet:
+            self._log.info("creating '%s' archive", self.filename)
         self._zip = zipfile.ZipFile(self._tmp_filename, "w", self._compress_type)
         return self
 
@@ -356,7 +377,8 @@ class ZipWriteStream:
         """
         self._ensure_open()
         for base_dir in base_dirs:
-            self._log.info("adding content of directory: %s", base_dir)
+            if not self.quiet:
+                self._log.info("adding content of directory: %s", base_dir)
             for path in emit_dir_content(base_dir):
                 arcname = os.path.relpath(path, base_dir)
                 self._write_file(path, prefix, arcname, timestamp)
@@ -382,10 +404,11 @@ class ZipWriteStream:
         if prefix:
             arcname = os.path.join(prefix, arcname)
         zinfo = self._make_zinfo_from_file(file_path, arcname)
-        if zinfo.is_dir():
-            self._log.info("adding: %s/", arcname)
-        else:
-            self._log.info("adding: %s", arcname)
+        if not self.quiet:
+            if zinfo.is_dir():
+                self._log.info("adding: %s/", arcname)
+            else:
+                self._log.info("adding: %s", arcname)
         if timestamp is None:
             timestamp = self.timestamp
         date_time = self._timestamp_to_date_time(timestamp)
@@ -557,7 +580,6 @@ class ZipContentFilter:
     def __init__(self, args):
         self._args = args
         self._rules = None
-        self._excludes = set()
         self._log = logging.getLogger("zip")
 
     def compile(self, patterns):
@@ -649,6 +671,10 @@ def get_build_system_from_pyproject_toml(pyproject_file):
                     continue
                 if bs and line.startswith("build-backend") and "poetry" in line:
                     return "poetry"
+                if line.startswith("[tool.uv]") or (
+                    bs and line.startswith("build-backend") and "uv" in line
+                ):
+                    return "uv"
 
 
 class BuildPlanManager:
@@ -659,20 +685,18 @@ class BuildPlanManager:
         self._source_paths = None
         self._log = log or logging.root
 
-    def hash(self, extra_paths):
+    def hash(self):
         if not self._source_paths:
             raise ValueError("BuildPlanManager.plan() should be called first")
-
-        content_hash_paths = self._source_paths + extra_paths
 
         # Generate a hash based on file names and content. Also use the
         # runtime value, build command, and content of the build paths
         # because they can have an effect on the resulting archive.
         self._log.debug("Computing content hash on files...")
-        content_hash = generate_content_hash(content_hash_paths, log=self._log)
+        content_hash = generate_content_hash(self._source_paths, log=self._log)
         return content_hash
 
-    def plan(self, source_path, query):
+    def plan(self, source_path, query, log=None):
         claims = source_path
         if not isinstance(source_path, list):
             claims = [source_path]
@@ -681,11 +705,14 @@ class BuildPlanManager:
         build_plan = []
         build_step = []
 
+        if log:
+            log = log.getChild("plan")
+
         def step(*x):
             build_step.append(x)
 
-        def hash(path):
-            source_paths.append(path)
+        def hash(path, patterns=None, prefix=None):
+            source_paths.append((path, patterns, prefix))
 
         def pip_requirements_step(path, prefix=None, required=False, tmp_dir=None):
             command = runtime
@@ -705,6 +732,33 @@ class BuildPlanManager:
 
                 step("pip", runtime, requirements, prefix, tmp_dir)
                 hash(requirements)
+
+        def uv_install_step(
+            path, uv_export_extra_args=[], prefix=None, required=False, tmp_dir=None
+        ):
+            uv_lock_file = path
+            if os.path.isdir(path):
+                uv_lock_file = os.path.join(path, "uv.lock")
+
+            uv_project_path = os.path.dirname(uv_lock_file)
+            pyproject_file = os.path.join(uv_project_path, "pyproject.toml")
+
+            has_lock = os.path.isfile(uv_lock_file)
+            has_pyproject = os.path.isfile(pyproject_file)
+
+            if not has_lock and not has_pyproject:
+                if required:
+                    raise RuntimeError(
+                        "Neither uv.lock nor pyproject.toml found in: {}".format(path)
+                    )
+                return
+
+            step("uv", runtime, path, uv_export_extra_args, prefix, tmp_dir)
+
+            if has_lock:
+                hash(uv_lock_file)
+            if has_pyproject:
+                hash(pyproject_file)
 
         def poetry_install_step(
             path, poetry_export_extra_args=[], prefix=None, required=False, tmp_dir=None
@@ -733,6 +787,14 @@ class BuildPlanManager:
             requirements = path
             if os.path.isdir(path):
                 requirements = os.path.join(path, "package.json")
+                npm_lock_file = os.path.join(path, "package-lock.json")
+            else:
+                npm_lock_file = os.path.join(os.path.dirname(path), "package-lock.json")
+
+            if os.path.isfile(npm_lock_file):
+                hash(npm_lock_file)
+                log.info("Added npm lock file: %s", npm_lock_file)
+
             if not os.path.isfile(requirements):
                 if required:
                     raise RuntimeError("File not found: {}".format(requirements))
@@ -746,7 +808,7 @@ class BuildPlanManager:
                 step("npm", runtime, requirements, prefix, tmp_dir)
                 hash(requirements)
 
-        def commands_step(path, commands):
+        def commands_step(path, commands, patterns):
             if not commands:
                 return
 
@@ -754,15 +816,12 @@ class BuildPlanManager:
                 commands = map(str.strip, commands.splitlines())
 
             if path:
-                path = os.path.normpath(path)
                 step("set:workdir", path)
 
             batch = []
             for c in commands:
                 if isinstance(c, str):
                     if c.startswith(":zip"):
-                        if path:
-                            hash(path)
                         if batch:
                             step("sh", "\n".join(batch))
                             batch.clear()
@@ -773,12 +832,18 @@ class BuildPlanManager:
                             prefix = prefix.strip()
                             _path = os.path.normpath(_path)
                             step("zip:embedded", _path, prefix)
+                            if path:
+                                hash(path, patterns, prefix)
                         elif n == 2:
                             _, _path = c
                             _path = os.path.normpath(_path)
                             step("zip:embedded", _path)
+                            if path:
+                                hash(path, patterns=patterns)
                         elif n == 1:
                             step("zip:embedded")
+                            if path:
+                                hash(path, patterns=patterns)
                         else:
                             raise ValueError(
                                 ":zip invalid call signature, use: "
@@ -792,7 +857,7 @@ class BuildPlanManager:
 
         for claim in claims:
             if isinstance(claim, str):
-                path = claim
+                path = os.path.normpath(claim)
                 if not os.path.exists(path):
                     abort(
                         'Could not locate source_path "{path}".  Paths are relative to directory where `terraform plan` is being run ("{pwd}")'.format(
@@ -801,8 +866,16 @@ class BuildPlanManager:
                     )
                 runtime = query.runtime
                 if runtime.startswith("python"):
-                    pip_requirements_step(os.path.join(path, "requirements.txt"))
-                    poetry_install_step(path)
+                    pyproject = os.path.join(path, "pyproject.toml")
+                    build_system = get_build_system_from_pyproject_toml(pyproject)
+                    if (
+                        os.path.isfile(os.path.join(path, "uv.lock"))
+                        or build_system == "uv"
+                    ):
+                        uv_install_step(path)
+                    else:
+                        pip_requirements_step(os.path.join(path, "requirements.txt"))
+                        poetry_install_step(path)
                 elif runtime.startswith("nodejs"):
                     npm_requirements_step(os.path.join(path, "package.json"))
                 step("zip", path, None)
@@ -810,15 +883,19 @@ class BuildPlanManager:
 
             elif isinstance(claim, dict):
                 path = claim.get("path")
+                if path:
+                    path = os.path.normpath(path)
                 patterns = claim.get("patterns")
                 commands = claim.get("commands")
                 if patterns:
                     step("set:filter", patterns_list(self._args, patterns))
                 if commands:
-                    commands_step(path, commands)
+                    commands_step(path, commands, patterns)
                 else:
                     prefix = claim.get("prefix_in_zip")
                     pip_requirements = claim.get("pip_requirements")
+                    uv_install = claim.get("uv_install")
+                    uv_export_extra_args = claim.get("uv_export_extra_args", [])
                     poetry_install = claim.get("poetry_install")
                     poetry_export_extra_args = claim.get("poetry_export_extra_args", [])
                     npm_requirements = claim.get(
@@ -836,10 +913,20 @@ class BuildPlanManager:
                             )
                         else:
                             pip_requirements_step(
-                                pip_requirements,
+                                os.path.normpath(pip_requirements),
                                 prefix,
                                 required=True,
                                 tmp_dir=claim.get("pip_tmp_dir"),
+                            )
+
+                    if uv_install and runtime.startswith("python"):
+                        if path:
+                            uv_install_step(
+                                path,
+                                prefix=prefix,
+                                uv_export_extra_args=uv_export_extra_args,
+                                required=True,
+                                tmp_dir=claim.get("uv_tmp_dir"),
                             )
 
                     if poetry_install and runtime.startswith("python"):
@@ -862,23 +949,14 @@ class BuildPlanManager:
                             )
                         else:
                             npm_requirements_step(
-                                npm_requirements,
+                                os.path.normpath(npm_requirements),
                                 prefix,
                                 required=True,
                                 tmp_dir=claim.get("npm_tmp_dir"),
                             )
                     if path:
-                        path = os.path.normpath(path)
                         step("zip", path, prefix)
-                        if patterns:
-                            # Take patterns into account when computing hash
-                            pf = ZipContentFilter(args=self._args)
-                            pf.compile(patterns)
-
-                            for path_from_pattern in pf.filter(path, prefix):
-                                hash(path_from_pattern)
-                        else:
-                            hash(path)
+                        hash(path, patterns, prefix)
             else:
                 raise ValueError("Unsupported source_path item: {}".format(claim))
 
@@ -886,7 +964,18 @@ class BuildPlanManager:
                 build_plan.append(build_step)
                 build_step = []
 
-        self._source_paths = source_paths
+        if log.isEnabledFor(DEBUG3):
+            log.debug("source_paths: %s", json.dumps(source_paths, indent=2))
+
+        for p, patterns, prefix in source_paths:
+            if self._source_paths is None:
+                self._source_paths = []
+            pf = None
+            if patterns is not None:
+                pf = ZipContentFilter(args=self._args)
+                pf.compile(patterns)
+            self._source_paths.append((p, pf, prefix))
+
         return build_plan
 
     def execute(self, build_plan, zip_stream, query):
@@ -965,6 +1054,20 @@ class BuildPlanManager:
                             else:
                                 # XXX: timestamp=0 - what actually do with it?
                                 zs.write_dirs(rd, prefix=prefix, timestamp=0)
+                elif cmd == "uv":
+                    (runtime, path, uv_export_extra_args, prefix, tmp_dir) = action[1:]
+                    log.info("uv_export_extra_args: %s", uv_export_extra_args)
+                    with install_uv_dependencies(
+                        query, path, uv_export_extra_args, tmp_dir
+                    ) as rd:
+                        if rd:
+                            if pf:
+                                self._zip_write_with_filter(
+                                    zs, pf, rd, prefix, timestamp=0
+                                )
+                            else:
+                                zs.write_dirs(rd, prefix=prefix, timestamp=0)
+
                 elif cmd == "npm":
                     runtime, npm_requirements, prefix, tmp_dir = action[1:]
                     with install_npm_requirements(
@@ -1088,7 +1191,7 @@ def install_pip_requirements(query, requirements_file, tmp_dir):
                 ok = True
         elif docker_file or docker_build_root:
             raise ValueError(
-                "docker_image must be specified " "for a custom image future references"
+                "docker_image must be specified for a custom image future references"
             )
 
     working_dir = os.getcwd()
@@ -1108,7 +1211,7 @@ def install_pip_requirements(query, requirements_file, tmp_dir):
             elif OSX:
                 # Workaround for OSX when XCode command line tools'
                 # python becomes the main system python interpreter
-                os_path = "{}:/Library/Developer/CommandLineTools" "/usr/bin".format(
+                os_path = "{}:/Library/Developer/CommandLineTools/usr/bin".format(
                     os.environ["PATH"]
                 )
                 subproc_env = os.environ.copy()
@@ -1162,7 +1265,15 @@ def install_pip_requirements(query, requirements_file, tmp_dir):
                 cmd_log.info(shlex_join(pip_command))
                 log_handler and log_handler.flush()
                 try:
-                    check_call(pip_command, env=subproc_env)
+                    if query.quiet:
+                        check_call(
+                            pip_command,
+                            env=subproc_env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        check_call(pip_command, env=subproc_env)
                 except FileNotFoundError as e:
                     raise RuntimeError(
                         "Python interpreter version equal "
@@ -1338,7 +1449,15 @@ def install_poetry_dependencies(query, path, poetry_export_extra_args, tmp_dir):
                 cmd_log.info(poetry_commands)
                 log_handler and log_handler.flush()
                 for poetry_command in poetry_commands:
-                    check_call(poetry_command, env=subproc_env)
+                    if query.quiet:
+                        check_call(
+                            poetry_command,
+                            env=subproc_env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        check_call(poetry_command, env=subproc_env)
 
             os.remove(pyproject_target_file)
             if poetry_lock_target_file:
@@ -1347,6 +1466,209 @@ def install_poetry_dependencies(query, path, poetry_export_extra_args, tmp_dir):
                 os.remove(poetry_toml_target_file)
 
             yield temp_dir
+
+
+@contextmanager
+def install_uv_dependencies(query, path, uv_export_extra_args, tmp_dir):
+    def copy_file_to_target(file, target_dir):
+        filename = os.path.basename(file)
+        target_file = os.path.join(target_dir, filename)
+        shutil.copyfile(file, target_file)
+        return target_file
+
+    def strip_editable_self_dependency(requirements_file, query):
+        cleaned = []
+        is_lambda_build = (
+            query is not None
+            and hasattr(query, "runtime")
+            and hasattr(query, "artifacts_dir")
+        )
+
+        with open(requirements_file, "r") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped == "-e ." and is_lambda_build:
+                    continue
+                if stripped.startswith("-e file:") or stripped.startswith("file://"):
+                    continue
+                cleaned.append(line.rstrip())
+
+        with open(requirements_file, "w") as f:
+            f.write("\n".join(cleaned) + "\n")
+
+    uv_lock_file = path
+    if os.path.isdir(path):
+        uv_lock_file = os.path.join(path, "uv.lock")
+    project_path = (
+        os.path.dirname(uv_lock_file) if os.path.isdir(path) else os.path.dirname(path)
+    )
+    pyproject_file = os.path.join(project_path, "pyproject.toml")
+
+    runtime = query.runtime
+    docker = query.docker
+    docker_image_tag_id = None
+    generated_uv_lock = False
+
+    uv_exec = "uv.exe" if WINDOWS and not docker else "uv"
+    subproc_env = None
+
+    if docker:
+        docker_file = docker.docker_file
+        docker_image = docker.docker_image
+        docker_build_root = docker.docker_build_root
+
+        if docker_image:
+            output = (
+                check_output(docker_image_id_command(docker_image)).decode().strip()
+            )
+            if not output:
+                docker_cmd = docker_build_command(
+                    build_root=docker_build_root,
+                    docker_file=docker_file,
+                    tag=docker_image,
+                )
+                check_call(docker_cmd)
+                output = (
+                    check_output(docker_image_id_command(docker_image)).decode().strip()
+                )
+            docker_image_tag_id = output
+        elif docker_file or docker_build_root:
+            raise ValueError(
+                "docker_image must be specified when using docker_file or docker_build_root"
+            )
+
+    log.info("Installing python dependencies with uv (no editable installs)")
+
+    with tempdir(tmp_dir) as temp_dir:
+        pyproject_target = copy_file_to_target(pyproject_file, temp_dir)
+
+        uv_lock_target = None
+        if os.path.exists(uv_lock_file):
+            uv_lock_target = copy_file_to_target(uv_lock_file, temp_dir)
+        elif os.path.exists(pyproject_target):
+            # Check if uv is available before attempting to use it
+            try:
+                check_output([uv_exec, "--version"], stderr=subprocess.STDOUT)
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    f"uv must be installed and available in PATH for runtime ({runtime}). "
+                    f"Install uv with: pip install uv"
+                ) from e
+
+            # Generate lock file
+            try:
+                check_call([uv_exec, "lock"], cwd=temp_dir)
+                uv_lock_target = os.path.join(temp_dir, "uv.lock")
+                generated_uv_lock = True
+                log.info("Generated uv.lock from pyproject.toml")
+            except CalledProcessError as e:
+                raise RuntimeError(
+                    f"Failed to generate uv.lock from pyproject.toml. "
+                    f"Check that your pyproject.toml has valid dependency specifications. "
+                    f"Command failed with exit code {e.returncode}"
+                ) from e
+        else:
+            raise RuntimeError(
+                "uv build requires either uv.lock or pyproject.toml to be present"
+            )
+
+        with cd(temp_dir):
+            uv_export = [
+                uv_exec,
+                "export",
+                "--python",
+                runtime,
+                "--no-dev",
+                "-o",
+                "requirements.txt",
+            ]
+
+            user_lock_exists = os.path.exists(uv_lock_file)
+            if user_lock_exists:
+                uv_export.append("--frozen")
+
+            uv_export += uv_export_extra_args
+
+            if docker:
+                shell_command = [
+                    " && ".join(
+                        [
+                            shlex_join(uv_export),
+                            "sed -i.bak '/^-e \\.\\$/d' requirements.txt",
+                            shlex_join(
+                                [
+                                    uv_exec,
+                                    "pip",
+                                    "install",
+                                    "--python",
+                                    runtime,
+                                    "--system",
+                                    "--no-compile",
+                                    "--target=.",
+                                    "--requirement=requirements.txt",
+                                ]
+                            ),
+                            f"chown -R {os.getuid()}:{os.getgid()} .",
+                        ]
+                    )
+                ]
+
+                check_call(
+                    docker_run_command(
+                        ".",
+                        shell_command,
+                        runtime,
+                        image=docker_image_tag_id,
+                        shell=True,
+                        ssh_agent=docker.with_ssh_agent,
+                        docker=docker,
+                    )
+                )
+            else:
+                check_call(uv_export, env=subproc_env)
+                strip_editable_self_dependency("requirements.txt", query)
+                check_call(
+                    [
+                        uv_exec,
+                        "pip",
+                        "install",
+                        "--python",
+                        runtime,
+                        "--system",
+                        "--no-compile",
+                        "--target=.",
+                        "--requirement=requirements.txt",
+                    ],
+                    env=subproc_env,
+                )
+
+        if generated_uv_lock and os.path.isdir(path):
+            source_uv_lock = os.path.join(path, "uv.lock")
+            try:
+                shutil.copyfile(uv_lock_target, source_uv_lock)
+                log.info("Generated uv.lock saved to: %s", source_uv_lock)
+            except (PermissionError, OSError) as e:
+                log.warning(
+                    "Failed to save generated uv.lock to source directory %s: %s. "
+                    "The build will succeed but uv.lock won't be persisted. "
+                    "Ensure the source directory is writable or manually copy uv.lock from the build artifacts.",
+                    path,
+                    e,
+                )
+
+        # Cleanup copied metadata
+        try:
+            os.remove(pyproject_target)
+        except FileNotFoundError:
+            log.debug("pyproject_target already removed: %s", pyproject_target)
+
+        if uv_lock_target:
+            try:
+                os.remove(uv_lock_target)
+            except FileNotFoundError:
+                log.debug("uv_lock_target already removed: %s", uv_lock_target)
+
+        yield temp_dir
 
 
 @contextmanager
@@ -1390,14 +1712,15 @@ def install_npm_requirements(query, requirements_file, tmp_dir):
                 ok = True
         elif docker_file or docker_build_root:
             raise ValueError(
-                "docker_image must be specified " "for a custom image future references"
+                "docker_image must be specified for a custom image future references"
             )
 
     log.info("Installing npm requirements: %s", requirements_file)
     with tempdir(tmp_dir) as temp_dir:
-        requirements_filename = os.path.basename(requirements_file)
-        target_file = os.path.join(temp_dir, requirements_filename)
-        shutil.copyfile(requirements_file, target_file)
+        temp_copy = TemporaryCopy(os.path.dirname(requirements_file), temp_dir, log)
+        temp_copy.add(os.path.basename(requirements_file))
+        temp_copy.add("package-lock.json", required=False)
+        temp_copy.copy_to_target_dir()
 
         subproc_env = None
         npm_exec = "npm"
@@ -1434,7 +1757,15 @@ def install_npm_requirements(query, requirements_file, tmp_dir):
                 cmd_log.info(shlex_join(npm_command))
                 log_handler and log_handler.flush()
                 try:
-                    check_call(npm_command, env=subproc_env)
+                    if query.quiet:
+                        check_call(
+                            npm_command,
+                            env=subproc_env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        check_call(npm_command, env=subproc_env)
                 except FileNotFoundError as e:
                     raise RuntimeError(
                         "Nodejs interpreter version equal "
@@ -1442,8 +1773,61 @@ def install_npm_requirements(query, requirements_file, tmp_dir):
                         "available in system PATH".format(runtime)
                     ) from e
 
-            os.remove(target_file)
+            temp_copy.remove_from_target_dir()
             yield temp_dir
+
+
+class TemporaryCopy:
+    """Temporarily copy files to a specified location and remove them when
+    not needed.
+    """
+
+    def __init__(self, source_dir_path, target_dir_path, logger=None):
+        """Initialise with a target and a source directories."""
+        self.source_dir_path = source_dir_path
+        self.target_dir_path = target_dir_path
+        self._filenames = []
+        self._logger = logger
+
+    def _make_source_path(self, filename):
+        return os.path.join(self.source_dir_path, filename)
+
+    def _make_target_path(self, filename):
+        return os.path.join(self.target_dir_path, filename)
+
+    def add(self, filename, *, required=True):
+        """Add a file to be copied from from source to target directory
+        when `TemporaryCopy.copy_to_target_dir()` is called.
+
+        By default, the file must exist in the source directory. Set `required`
+        to `False` if the file is optional.
+        """
+        if os.path.exists(self._make_source_path(filename)):
+            self._filenames.append(filename)
+        elif required:
+            raise RuntimeError("File not found: {}".format(filename))
+
+    def copy_to_target_dir(self):
+        """Copy files (added so far) to the target directory."""
+        for filename in self._filenames:
+            if self._logger:
+                self._logger.info("Copying temporarily '%s'", filename)
+
+            shutil.copyfile(
+                self._make_source_path(filename),
+                self._make_target_path(filename),
+            )
+
+    def remove_from_target_dir(self):
+        """Remove files (added so far) from the target directory."""
+        for filename in self._filenames:
+            if self._logger:
+                self._logger.info("Removing temporarily copied '%s'", filename)
+
+            try:
+                os.remove(self._make_target_path(filename))
+            except FileNotFoundError:
+                pass
 
 
 def docker_image_id_command(tag):
@@ -1600,7 +1984,7 @@ def prepare_command(args):
         if log.isEnabledFor(DEBUG3):
             log.debug("QUERY: %s", json.dumps(query_data, indent=2))
         else:
-            log_excludes = ("source_path", "hash_extra_paths", "paths")
+            log_excludes = ("source_path", "hash_internal", "paths")
             qd = {k: v for k, v in query_data.items() if k not in log_excludes}
             log.debug("QUERY (excerpt): %s", json.dumps(qd, indent=2))
 
@@ -1610,9 +1994,9 @@ def prepare_command(args):
     runtime = query.runtime
     function_name = query.function_name
     artifacts_dir = query.artifacts_dir
-    hash_extra_paths = query.hash_extra_paths
     source_path = query.source_path
     hash_extra = query.hash_extra
+    hash_internal = query.hash_internal
     recreate_missing_package = yesno_bool(
         args.recreate_missing_package
         if args.recreate_missing_package is not None
@@ -1621,17 +2005,16 @@ def prepare_command(args):
     docker = query.docker
 
     bpm = BuildPlanManager(args, log=log)
-    build_plan = bpm.plan(source_path, query)
+    build_plan = bpm.plan(source_path, query, log)
 
     if log.isEnabledFor(DEBUG2):
         log.debug("BUILD_PLAN: %s", json.dumps(build_plan, indent=2))
 
-    # Expand a Terraform path.<cwd|root|module> references
-    hash_extra_paths = [p.format(path=tf_paths) for p in hash_extra_paths]
-
-    content_hash = bpm.hash(hash_extra_paths)
+    content_hash = bpm.hash()
     content_hash.update(json.dumps(build_plan, sort_keys=True).encode())
     content_hash.update(runtime.encode())
+    for c in hash_internal:
+        content_hash.update(c.encode())
     content_hash.update(hash_extra.encode())
     content_hash = content_hash.hexdigest()
 
@@ -1639,7 +2022,6 @@ def prepare_command(args):
     zip_filename = os.path.join(artifacts_dir, "{}.zip".format(content_hash))
 
     # Compute timestamp trigger
-    was_missing = False
     filename_path = os.path.join(os.getcwd(), zip_filename)
     if recreate_missing_package:
         if os.path.exists(filename_path):
@@ -1647,9 +2029,8 @@ def prepare_command(args):
             timestamp = st.st_mtime_ns
         else:
             timestamp = timestamp_now_ns()
-            was_missing = True
     else:
-        timestamp = "<WARNING: Missing lambda zip artifacts " "wouldn't be restored>"
+        timestamp = "<WARNING: Missing lambda zip artifacts wouldn't be restored>"
 
     # Replace variables in the build command with calculated values.
     build_data = {
@@ -1657,6 +2038,7 @@ def prepare_command(args):
         "runtime": runtime,
         "artifacts_dir": artifacts_dir,
         "build_plan": build_plan,
+        "quiet": query.quiet,
     }
     if docker:
         build_data["docker"] = docker
@@ -1677,7 +2059,6 @@ def prepare_command(args):
             "build_plan": build_plan,
             "build_plan_filename": build_plan_filename,
             "timestamp": str(timestamp),
-            "was_missing": "true" if was_missing else "false",
         },
         sys.stdout,
         indent=2,
@@ -1716,12 +2097,13 @@ def build_command(args):
 
     # Zip up the build plan and write it to the target filename.
     # This will be used by the Lambda function as the source code package.
-    with ZipWriteStream(filename) as zs:
+    with ZipWriteStream(filename, quiet=getattr(query, "quiet", False)) as zs:
         bpm = BuildPlanManager(args, log=log)
         bpm.execute(build_plan, zs, query)
 
     os.utime(filename, ns=(timestamp, timestamp))
-    log.info("Created: %s", shlex.quote(filename))
+    if not getattr(query, "quiet", False):
+        log.info("Created: %s", shlex.quote(filename))
     if log.isEnabledFor(logging.DEBUG):
         with open(filename, "rb") as f:
             log.info("Base64sha256: %s", source_code_hash(f.read()))
